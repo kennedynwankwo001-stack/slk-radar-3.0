@@ -1,0 +1,4 @@
+.env
+radar_data/
+__pycache__/
+*.pyc
