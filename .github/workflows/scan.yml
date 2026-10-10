@@ -1,0 +1,52 @@
+name: SLK Radar scan
+
+on:
+  schedule:
+    - cron: "10,40 1,2,5,6,9,10,13,14,17,18,21,22 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (print messages in the log, do not send to Telegram)"
+        type: boolean
+        default: false
+
+concurrency:
+  group: slk-radar
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Restore radar memory
+        uses: actions/cache/restore@v4
+        with:
+          path: radar_data
+          key: radar-${{ github.run_id }}
+          restore-keys: radar-
+
+      - name: Scan
+        env:
+          TWELVE_DATA_API_KEY: ${{ secrets.TWELVE_DATA_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          DRY: ${{ inputs.dry_run }}
+        run: |
+          if [ "$DRY" = "true" ]; then python -m slk_radar scan --dry-run; else python -m slk_radar scan; fi
+
+      - name: Save radar memory
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: radar_data
+          key: radar-${{ github.run_id }}
