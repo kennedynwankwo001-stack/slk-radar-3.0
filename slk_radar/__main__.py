@@ -62,14 +62,14 @@ def main(argv=None) -> int:
             t += timedelta(hours=1)
         return 0
 
-    key = os.environ.get("TWELVE_DATA_API_KEY", "")
+    key = os.environ.get("TWELVE_DATA_API_KEY", "").strip()
     if not key:
         print("Missing TWELVE_DATA_API_KEY (set it as a GitHub repo secret).", file=sys.stderr)
         return 2
     if a.dry_run:
         notifier = PrintNotifier()
     else:
-        tok, chat = os.environ.get("TELEGRAM_BOT_TOKEN", ""), os.environ.get("TELEGRAM_CHAT_ID", "")
+        tok, chat = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip(), os.environ.get("TELEGRAM_CHAT_ID", "").strip()
         if not tok or not chat:
             print("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID.", file=sys.stderr)
             return 2

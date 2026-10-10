@@ -200,3 +200,23 @@ class Commands(unittest.TestCase):
             self.assertEqual(done, 2)
             self.assertIn("EURAUD", n.sent[0] + n.sent[1])
             self.assertEqual(st.data["tg_offset"], 4)
+
+
+class NoFlood(unittest.TestCase):
+    def test_baseline_setups_get_no_reminder(self):
+        h1 = {"CADCHF": load_csv(os.path.join(DATA, "CADCHF_H1.csv"))}
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "s.json")
+            for now in (utc(2026, 10, 8, 5, 30), utc(2026, 10, 8, 21, 30)):   # baseline, then a Daily close
+                n = PrintNotifier()
+                run_scan(now, State(path), n, lambda p: h1[p], pairs=["CADCHF"], spacing=0, log=lambda *a: None)
+            self.assertFalse(any("reminder" in t for t in n.sent))
+
+    def test_chat_id_with_space_still_answers(self):
+        from slk_radar.commands import handle_commands
+        class N(PrintNotifier):
+            chat_id = "42 \n"
+            def get_updates(self, offset=None):
+                return [{"update_id": 1, "message": {"chat": {"id": 42}, "text": "/help"}}]
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(handle_commands(N(), State(os.path.join(d, "s.json")), None, utc(2026, 10, 8), log=lambda *a: None), 1)

@@ -29,13 +29,13 @@ class State:
 
     # ---- setups waiting for a reminder
     def add_setup(self, key: str, symbol: str, when: datetime) -> None:
-        self.data["setups"].setdefault(key, {"symbol": symbol, "alerted": _iso(when), "reminded": False})
+        self.data["setups"].setdefault(key, {"symbol": symbol, "alerted": _iso(when), "reminded": False, "notified": True})
 
     def due_reminders(self, daily_boundary: datetime) -> list[tuple[str, dict]]:
         """Setups alerted before the latest Daily close that have not been reminded yet."""
         out = []
         for k, v in self.data["setups"].items():
-            if not v["reminded"] and datetime.fromisoformat(v["alerted"]) < daily_boundary:
+            if v.get("notified") and not v["reminded"] and datetime.fromisoformat(v["alerted"]) < daily_boundary:
                 out.append((k, v))
         return out
 

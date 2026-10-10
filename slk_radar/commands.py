@@ -43,8 +43,10 @@ def handle_commands(notifier, state: State, get_h1, now: datetime, st: Settings 
     for u in updates:
         state.data["tg_offset"] = u["update_id"] + 1
         msg = u.get("message") or {}
-        if str((msg.get("chat") or {}).get("id")) != str(notifier.chat_id):
+        if str((msg.get("chat") or {}).get("id")).strip() != str(notifier.chat_id).strip():
+            log(f"ignored a message from another chat ({(msg.get('chat') or {}).get('id')}); your TELEGRAM_CHAT_ID is {str(notifier.chat_id).strip()!r}")
             continue
+        log(f"command: {msg.get('text', '')[:40]!r}")
         text = reply_for(msg.get("text", ""), get_h1, now, st)
         if text:
             try:

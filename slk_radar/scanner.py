@@ -93,17 +93,20 @@ def run_scan(
         ok = True
         if a.forming:
             if st.early_alert and d.grade == st.early_min_grade and fresh and not state.was_sent(key + "|confirmed"):
-                ok = send(key + "|early", alert_text(a)) is not None
-                state.add_setup(key, pair, now)
+                r = send(key + "|early", alert_text(a))
+                ok = r is not None
+                if r:
+                    state.add_setup(key, pair, now)
         else:
             if state.was_sent(key + "|early"):
                 state.mark_sent(key + "|confirmed", now)          # already told; the Daily candle held
             elif fresh:
-                ok = send(key + "|confirmed", alert_text(a)) is not None
-                state.add_setup(key, pair, now)
+                r = send(key + "|confirmed", alert_text(a))
+                ok = r is not None
+                if r:
+                    state.add_setup(key, pair, now)
             else:
                 state.mark_sent(key + "|confirmed", now)          # old breakout: no flood after downtime
-                state.add_setup(key, pair, now)
             if a.status == "retest" and a.h4_result.rej_index is not None:
                 if a.h4[a.h4_result.rej_index].end >= boundary - timedelta(hours=4 * STALE_H4):
                     ok = ok and send(key + "|retest", retest_text(a)) is not None
