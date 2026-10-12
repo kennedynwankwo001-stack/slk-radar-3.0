@@ -22,6 +22,14 @@ from .state import State
 STALE_H4 = 3   # a breakout older than this many H4 candles is not announced as new (after downtime)
 
 
+def _late(now: datetime, t: datetime | None) -> str:
+    """A warning line when a message goes out long after the candle that caused it closed."""
+    if t is None or now - t < timedelta(minutes=45):
+        return ""
+    m = int((now - t).total_seconds() // 60)
+    return f"\n⚠️ Sent {m // 60}h {m % 60}m after the candle closed (late run). Check price before acting."
+
+
 def _watch_text(items: list[Analysis]) -> str:
     if not items:
         return "SLK RADAR · watching: nothing developing right now (no Strong/Medium DRD waiting for an H4 breakout)."
@@ -93,7 +101,7 @@ def run_scan(
         ok = True
         if a.forming:
             if st.early_alert and d.grade == st.early_min_grade and fresh and not state.was_sent(key + "|confirmed"):
-                r = send(key + "|early", alert_text(a))
+                r = send(key + "|early", alert_text(a) + _late(now, a.bo_time))
                 ok = r is not None
                 if r:
                     state.add_setup(key, pair, now)
@@ -101,7 +109,7 @@ def run_scan(
             if state.was_sent(key + "|early"):
                 state.mark_sent(key + "|confirmed", now)          # already told; the Daily candle held
             elif fresh:
-                r = send(key + "|confirmed", alert_text(a))
+                r = send(key + "|confirmed", alert_text(a) + _late(now, a.bo_time))
                 ok = r is not None
                 if r:
                     state.add_setup(key, pair, now)
@@ -109,7 +117,7 @@ def run_scan(
                 state.mark_sent(key + "|confirmed", now)          # old breakout: no flood after downtime
             if a.status == "retest" and a.h4_result.rej_index is not None:
                 if a.h4[a.h4_result.rej_index].end >= boundary - timedelta(hours=4 * STALE_H4):
-                    ok = ok and send(key + "|retest", retest_text(a)) is not None
+                    ok = ok and send(key + "|retest", retest_text(a) + _late(now, a.h4[a.h4_result.rej_index].end)) is not None
                 else:
                     state.mark_sent(key + "|retest", now)
         if not ok:
