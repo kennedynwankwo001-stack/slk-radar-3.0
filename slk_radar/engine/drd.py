@@ -1,11 +1,13 @@
 """DRD (Daily Reject Daily): a Daily candle rejects a Daily key level.
 
-Score (max 5): level quality +2 for any valid level (fresh, tested, with history, or flip),
-rejection +2 strong / +1 weak, PDH/PDL sweep +1. Strong = 5, Medium = 3-4, Weak = 2 or less.
-Weak never sets bias and never alerts.
+A DRD is "clean" (it sets bias and can alert) when it rejects a valid level with a STRONG
+rejection (the close is beyond the far side of the zone). An unclear (weak) rejection never sets
+bias and never alerts. There is no points score in what you see. Internally a number is still kept
+only to RANK DRDs: it is higher when the DRD also swept PDH/PDL (preferred).
 
-Several DRDs: the higher score wins, a tie goes to the level closer to price. An active DRD is
-cancelled only by (1) its level being disrespected, (2) a later opposing Strong/Medium DRD.
+Several DRDs: the one with the PDH/PDL sweep first, then the candle colour that matches the
+direction, then the level closer to price. An active DRD is cancelled only by (1) its level being
+disrespected, (2) a later opposing clean DRD.
 (The third rule, an H4 close against the confirming swing, lives in h4.py.)
 """
 from __future__ import annotations
@@ -32,7 +34,8 @@ class DRD:
 
     @property
     def actionable(self) -> bool:
-        return self.grade in ("strong", "medium")
+        """Clean DRD: valid level (always true here) and a strong rejection."""
+        return self.rejection == "strong"
 
 
 @dataclass
@@ -123,7 +126,7 @@ def scan(c: list[Candle], atr: list[float], st: Settings) -> DrdScan:
             continue
         later_opposite = [o for o in cands if o.index > d.index and o.direction != d.direction]
         if later_opposite:
-            res.cancelled.append((d, "a later opposing Strong/Medium DRD appeared"))
+            res.cancelled.append((d, "a later opposing DRD appeared"))
             continue
         alive.append(d)
     if alive:

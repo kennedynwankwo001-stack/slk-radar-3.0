@@ -1,6 +1,6 @@
 """Command line.
 
-  python -m slk_radar radar FILE.csv --symbol EURAUD [--as-of 2026-10-01T12:00] [--entry]
+  python -m slk_radar radar FILE.csv --symbol EURAUD [--as-of 2026-10-01T12:00]
   python -m slk_radar replay FILE.csv --symbol EURAUD --from 2026-09-28 --to 2026-10-01
   python -m slk_radar scan [--dry-run]
 
@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 from .candles import load_csv
 from .data import DataError, update_candles
 from .notify import PrintNotifier, TelegramNotifier
-from .radar import alert_text, analyze, entry_plan, radar_text, retest_text
+from .radar import alert_text, analyze, h4rh4_text, radar_text
 from .commands import handle_commands
 from .scanner import run_scan
 from .state import State
@@ -32,7 +32,7 @@ def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="slk_radar")
     sub = p.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("radar"); r.add_argument("file"); r.add_argument("--symbol", required=True)
-    r.add_argument("--as-of"); r.add_argument("--entry", action="store_true")
+    r.add_argument("--as-of")
     rp = sub.add_parser("replay"); rp.add_argument("file"); rp.add_argument("--symbol", required=True)
     rp.add_argument("--from", dest="start", required=True); rp.add_argument("--to", dest="end", required=True)
     s = sub.add_parser("scan"); s.add_argument("--dry-run", action="store_true")
@@ -43,8 +43,6 @@ def main(argv=None) -> int:
         h1 = load_csv(a.file)
         an = analyze(a.symbol, h1, now=_t(a.as_of) if a.as_of else None)
         print(radar_text(an))
-        if a.entry:
-            print("\n" + entry_plan(an, h1))
         return 0
 
     if a.cmd == "replay":
@@ -58,7 +56,7 @@ def main(argv=None) -> int:
                     if k + "|c" not in seen and not an.forming:
                         seen.add(k + "|c"); print(f"[{t:%a %d %b %H:%M} UTC]\n{alert_text(an)}\n")
                     if an.status == "retest" and k + "|r" not in seen:
-                        seen.add(k + "|r"); print(f"[{t:%a %d %b %H:%M} UTC]\n{retest_text(an)}\n")
+                        seen.add(k + "|r"); print(f"[{t:%a %d %b %H:%M} UTC]\n{h4rh4_text(an)}\n")
             t += timedelta(hours=1)
         return 0
 

@@ -1,6 +1,6 @@
 """Telegram commands, answered at the start of every scan run:
-  /entry EURAUD   entry plan for a confirmed setup
   /radar EURAUD   the full radar read
+  /results        how the alerted setups ended (won, lost, open)
 Only messages from your own chat are answered."""
 from __future__ import annotations
 
@@ -9,24 +9,27 @@ from datetime import datetime
 
 from .notify import NotifyError
 from .pairs import PAIRS
-from .radar import analyze, entry_plan, radar_text
+from .radar import analyze, radar_text
+from .results import results_text
 from .settings import Settings
 from .state import State
 
-HELP = "Commands: /entry EURAUD (entry plan) · /radar EURAUD (full read)"
+HELP = "Commands: /radar EURAUD (full read) · /results (how alerts ended). The radar gives bias only, no entries."
 
 
-def reply_for(text: str, get_h1, now: datetime, st: Settings) -> str | None:
-    m = re.match(r"^/(entry|radar)(?:@\w+)?(?:\s+([A-Za-z/]+))?\s*$", (text or "").strip())
+def reply_for(text: str, get_h1, now: datetime, st: Settings, state: State | None = None) -> str | None:
+    t = (text or "").strip()
+    if re.match(r"^/results(?:@\w+)?\s*$", t):
+        return results_text(state, st) if state is not None else HELP
+    m = re.match(r"^/radar(?:@\w+)?(?:\s+([A-Za-z/]+))?\s*$", t)
     if not m:
-        return HELP if (text or "").strip().startswith("/") else None
-    cmd, pair = m.group(1), (m.group(2) or "").replace("/", "").upper()
+        return HELP if t.startswith("/") else None
+    pair = (m.group(1) or "").replace("/", "").upper()
     if pair not in PAIRS:
         return f"Pair not in the list. Try one of: {', '.join(PAIRS[:6])} ...\n{HELP}"
     try:
         h1 = get_h1(pair)
-        a = analyze(pair, h1, st, now=now)
-        return entry_plan(a, h1, st) if cmd == "entry" else radar_text(a)
+        return radar_text(analyze(pair, h1, st, now=now))
     except Exception as e:
         return f"{pair}: could not read data right now ({type(e).__name__}). Try again later."
 
@@ -47,7 +50,7 @@ def handle_commands(notifier, state: State, get_h1, now: datetime, st: Settings 
             log(f"ignored a message from another chat ({(msg.get('chat') or {}).get('id')}); your TELEGRAM_CHAT_ID is {str(notifier.chat_id).strip()!r}")
             continue
         log(f"command: {msg.get('text', '')[:40]!r}")
-        text = reply_for(msg.get("text", ""), get_h1, now, st)
+        text = reply_for(msg.get("text", ""), get_h1, now, st, state)
         if text:
             try:
                 notifier.send(text)

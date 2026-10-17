@@ -1,17 +1,17 @@
 # SLK Radar
 
-Scans 23 forex pairs after every H4 close and sends a Telegram message when a **Strong/Medium Daily DRD** is confirmed by an **H4 body-close breakout**.
+Scans 23 forex pairs after every H4 close and sends a Telegram message when a clean **Daily DRD** is confirmed by an **H4 body-close breakout**. It then waits for **H4 Reject H4** and tells you when it happens. It never gives entries.
 SLK = **S**tructure (direction), **L**iquidity (target), **K**ey levels (decision zones). Rules: `docs/slk_radar_rules_v1.md`.
 
 It runs free on GitHub Actions. No server needed.
 
 ## What you get on Telegram
-- **Alert**: DRD confirmed by an H4 breakout (also an "EARLY" version when a Strong DRD is still forming on the open Daily candle)
-- **Retest confirmed**: H4 rejection within 6 H4 candles after the breakout
-- **Reminder**: at the next Daily close, whether the setup is still valid or broken
-- **Watchlist**: once a day, the 3 best developing setups (not confirmed yet)
+- **SLK BIAS ALERT**: DRD confirmed by an H4 breakout (also an "EARLY" version when a clear rejection is still forming on the open Daily candle). At most 4 per Daily day, best first: PDH/PDL sweep, external breakout, most recent.
+- **SLK H4 R H4**: H4 rejection within 6 H4 candles after the breakout. This is the stage you wait for before looking at the lower timeframe.
+- **SLK CANCELLED** / **TARGET REACHED**: how the setup ended. Results are tracked automatically, with a weekly scorecard on Friday and `/results` any time.
+- **Daily summary**: one message at each Daily close: setups still valid, the 3 best developing ones, and any that broke
 
-The radar gives analysis only. It gives an entry plan only when you ask. Send your bot `/entry EURAUD` (entry plan) or `/radar EURAUD` (full read). It answers at the next scan run, which can be up to a few hours later because GitHub's free plan only runs on a schedule. On the command line use `--entry`.
+The radar gives bias only, no entries. Send your bot `/radar EURAUD` (full read) or `/results` (how alerts ended). It answers at the next scan run, which can be up to a few hours later because GitHub's free plan only runs on a schedule. 
 
 ## Setup (about 15 minutes, no cost)
 1. **Twelve Data key**: sign up at twelvedata.com (free Basic plan), copy your API key.
@@ -31,7 +31,7 @@ Never paste keys or tokens in chat, issues or code. If one leaks, make a new one
 
 ## Try it on your own data
 ```
-python -m slk_radar radar data/EURAUD_H1.csv --symbol EURAUD --as-of 2026-09-29T10:00 --entry
+python -m slk_radar radar data/EURAUD_H1.csv --symbol EURAUD --as-of 2026-09-29T10:00
 python -m slk_radar replay data/CADCHF_H1.csv --symbol CADCHF --from 2026-10-06 --to 2026-10-10
 python -m unittest discover -s tests -t .
 ```

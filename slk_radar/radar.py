@@ -1,5 +1,5 @@
 """The radar: puts candles, structure, levels, DRD, H4 confirmation and liquidity together and
-formats the radar text, the alert and the (on request) entry plan."""
+formats the radar text and the three messages (bias alert, H4 R H4, cancelled). It never gives entries."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -15,6 +15,11 @@ from .engine.indicators import atr_series
 from .engine.levels import Level, build_levels, valid_for_drd
 from .models import Candle
 from .settings import Settings
+
+
+def setup_key_for(symbol: str, d: drd_mod.DRD) -> str:
+    lv = d.level
+    return f"{symbol}:{d.direction}:{lv.kind}:{lv.side}:{lv.lo:.5f}:{lv.hi:.5f}"
 
 
 @dataclass
@@ -52,8 +57,7 @@ class Analysis:
         d = self.drd
         if d is None:
             return f"{self.symbol}:none"
-        lv = d.level
-        return f"{self.symbol}:{d.direction}:{lv.kind}:{lv.side}:{lv.lo:.5f}:{lv.hi:.5f}"
+        return setup_key_for(self.symbol, d)
 
     @property
     def bo_time(self) -> datetime | None:
@@ -66,14 +70,31 @@ class Analysis:
     def alertable(self) -> bool:
         return self.status in ("confirmed", "retest") and self.drd is not None and self.drd.actionable
 
+    @property
+    def external(self) -> bool:
+        return bool(self.h4_result and self.h4_result.external)
+
+    @property
+    def rank_key(self) -> tuple:
+        """Best-first order when more setups qualify than the daily cap allows:
+        PDH/PDL sweep, then an external H4 breakout, then the most recent breakout."""
+        d = self.drd
+        t = self.bo_time.timestamp() if self.bo_time else 0.0
+        return (int(bool(d and d.sweep)), int(self.external), t)
+
 
 def _local(t: datetime, st: Settings) -> str:
     return t.astimezone(ZoneInfo(st.display_tz)).strftime("%d %b %H:%M")
 
 
+def _when(t: datetime, st: Settings) -> str:
+    """Thu 08 Oct 02:00 in Lagos time (candle CLOSE time)."""
+    return t.astimezone(ZoneInfo(st.display_tz)).strftime("%a %d %b %H:%M")
+
+
 def _early_drd(h1, daily, atr_d, h4, st, now, active):
-    """Early DRD from the Daily candle that is still open. It must already grade `early_min_grade`
-    (Strong by default) and beat the active closed DRD, if there is one. The H4 breakout then has
+    """Early DRD from the Daily candle that is still open. It must already be a clean DRD (clear
+    rejection) and beat the active closed DRD, if there is one. The H4 breakout then has
     to come after the H4 candle that holds the rejection extreme (the low for a buy, the high for
     a sell). Returns (drd, forming candle, time from which an H4 breakout counts) or None."""
     fc = forming_candle(h1, 24, now)
@@ -82,7 +103,7 @@ def _early_drd(h1, daily, atr_d, h4, st, now, active):
     cand, grp = fc
     i = len(daily)
     d = drd_mod.detect_at(daily + [cand], atr_d + [atr_d[-1]], st, i)
-    if d is None or d.grade != st.early_min_grade:
+    if d is None or not d.actionable:
         return None
     if active is not None and d.score <= active.score:
         return None
@@ -161,11 +182,11 @@ def structure_text(a: Analysis) -> str:
 def drd_text(a: Analysis) -> str:
     d = a.drd
     if d is None:
-        weak = [x for x in a.scan.drds if x.grade == "weak"]
-        return "None active" + (f" ({len(weak)} Weak DRD(s) ignored)" if weak else "")
+        weak = [x for x in a.scan.drds if not x.actionable]
+        return "None active" + (f" ({len(weak)} unclear rejection(s) ignored)" if weak else "")
     early = "FORMING, Daily candle not closed yet: " if a.forming else ""
-    return (f"{early}{d.grade.capitalize()} {d.score}/5 on {a.day_label(d.index)} "
-            f"({'bullish' if d.direction == 'bull' else 'bearish'}, {d.rejection} rejection of {d.level.label} "
+    return (f"{early}Clean DRD on {a.day_label(d.index)} "
+            f"({'bullish' if d.direction == 'bull' else 'bearish'}, rejection of {d.level.label} "
             f"{_fmt(d.level.lo)}-{_fmt(d.level.hi)}{', PDL/PDH swept' if d.sweep else ''})")
 
 
@@ -177,11 +198,11 @@ def h4_text(a: Analysis) -> str:
         return "Waiting: no H4 body close through the latest H4 swing in the DRD direction yet"
     bo = a.h4[r.bo_index]
     word = "above" if a.drd.direction == "bull" else "below"
-    out = f"Breakout: H4 body close {word} {_fmt(r.bo_swing.price)} at {_local(bo.end, a.st)} Lagos time"
+    out = f"H4 BO ({'external' if r.external else 'internal'}): H4 body close {word} {_fmt(r.bo_swing.price)} at {_local(bo.end, a.st)} Lagos time"
     if r.sweep_text:
         out += f"; {r.sweep_text}"
     if r.rej_text:
-        out += f"; H4 rejection at {_local(a.h4[r.rej_index].end, a.st)}: {r.rej_text}"
+        out += f"; H4 R H4 at {_local(a.h4[r.rej_index].end, a.st)}: {r.rej_text}"
     if r.status == "cancelled":
         out += f"; CANCELLED: H4 closed back through {_fmt(r.bo_swing.price)} at {_local(a.h4[r.cancel_index].end, a.st)}"
     return out
@@ -189,16 +210,16 @@ def h4_text(a: Analysis) -> str:
 
 def summary_text(a: Analysis) -> str:
     if a.bias == "neutral":
-        return "No clear direction. No Strong/Medium DRD and no confirmed external break on Daily."
+        return "No clear direction. No clean DRD and no confirmed external break on Daily."
     word = a.bias.capitalize()
     if a.status == "no_setup":
         return f"{word} from Daily structure only. No DRD, no setup."
     if a.status == "watching":
-        return f"{word} DRD is active. Waiting for the H4 breakout to confirm."
+        return f"{word} DRD is active. Waiting for the H4 BO."
     if a.status == "confirmed":
-        return f"{word} setup confirmed by an H4 breakout. Retest not seen yet."
+        return f"{word} bias confirmed by the H4 BO. Waiting for H4 R H4, no entry yet."
     if a.status == "retest":
-        return f"{word} setup confirmed and the H4 rejection (retest) has closed."
+        return f"{word} bias confirmed and H4 R H4 has closed. You can look for an entry on the lower timeframe."
     return f"{word} setup was cancelled by an H4 close against it."
 
 
@@ -232,82 +253,71 @@ def radar_text(a: Analysis) -> str:
     return "\n".join(lines)
 
 
+def level_tag(lv: Level) -> str:
+    if lv.is_flip:
+        return "Flip"
+    if lv.history >= 2:
+        return f"{lv.history} reactions"
+    if lv.history == 1:
+        return "1 reaction"
+    return "Fresh" if lv.touches == 0 else "Tested"
+
+
 def alert_text(a: Analysis) -> str:
+    """The bias alert: clean DRD + closed H4 BO. It starts the wait for H4 R H4."""
     d, r = a.drd, a.h4_result
     assert d is not None and r is not None and r.bo_index is not None
     arrow = "🟢" if d.direction == "bull" else "🔴"
+    side = "BUY" if d.direction == "bull" else "SELL"
     bo = a.h4[r.bo_index]
-    word = "above" if d.direction == "bull" else "below"
     L = a.liquidity
-    lines = [
-        f"{arrow} SLK RADAR · {a.symbol}" + (" · EARLY, Daily not closed" if a.forming else ""),
-        f"Bias: {a.bias.capitalize()} (Daily DRD, {d.grade} {d.score}/5)",
-        f"Level: {_fmt(d.level.lo)}-{_fmt(d.level.hi)} · {d.level.label} · {d.level.status_text() if d.level.history else 'first reaction'}",
-        f"DRD candle: {a.day_label(d.index)}" + (" (still open, can change)" if a.forming else ""),
-        f"H4: body close {word} {_fmt(r.bo_swing.price)} · {_local(bo.end, a.st)} Lagos",
-    ]
-    if L.sweeps:
-        lines.append("Sweep: " + L.sweeps[0].split(" (")[0])
+    head = f"{arrow} SLK BIAS ALERT" + (" · EARLY (Daily not closed)" if a.forming else "")
+    lines = [head, f"Pair: {a.symbol}", f"Direction: {side}",
+             f"Daily Level: {_fmt(d.level.lo)} - {_fmt(d.level.hi)} ({d.level.kind} {d.level.side} · {level_tag(d.level)})"]
+    why = []
+    if d.sweep:
+        why.append("PDL swept" if d.direction == "bull" else "PDH swept")
     if r.sweep_text:
-        lines.append("H4 sweep: " + r.sweep_text)
+        why.append(r.sweep_text)
+    if why:
+        lines.append("Why: " + " + ".join(why))
+    lines.append(f"DRD: Daily candle {a.day_label(d.index)}" + (" (still open)" if a.forming else ""))
+    lines.append(f"H4 BO: {_fmt(r.bo_swing.price)} ({'external' if r.external else 'internal'}) · {_when(bo.end, a.st)} Lagos")
     if L.erl:
         lines.append(f"Target: {_fmt(L.erl.price)} ({L.erl.label})")
+    lines.append("Status: Waiting for H4 R H4")
+    if a.forming:
+        lines.append("The Daily candle is still open, this can change.")
+    lines.append("Bias only, not an entry signal.")
     return "\n".join(lines)
 
 
-def retest_text(a: Analysis) -> str:
+def h4rh4_text(a: Analysis) -> str:
+    """H4 Reject H4: the stage you wait for before looking at the lower timeframe."""
     r = a.h4_result
     assert a.drd is not None and r is not None and r.rej_index is not None
-    return (f"🔁 SLK RADAR · {a.symbol} retest confirmed\n"
-            f"H4 rejection {_local(a.h4[r.rej_index].end, a.st)} Lagos: {r.rej_text}\n"
-            f"Bias still {a.bias}.")
-
-
-def reminder_text(a: Analysis) -> str:
-    d = a.drd
-    if d is None:
-        return f"SLK RADAR · {a.symbol}: no active DRD any more."
-    state = {"cancelled": "BROKEN (cancelled)", "retest": "still valid, retest confirmed",
-             "confirmed": "still valid", "watching": "still valid, H4 breakout not seen yet"}.get(a.status, a.status)
-    return f"SLK RADAR reminder · {a.symbol} {a.bias}: setup is {state}. Price {_fmt(a.price)}."
-
-
-# --------------------------------------------------------------------------- entry plan
-
-
-def entry_plan(a: Analysis, h1: list[Candle], st: Settings | None = None) -> str:
-    """Entry plan on request: nearest H1 key level on the right side below/above price, stop
-    beyond its extreme, target the next external liquidity. Only for a valid, confirmed setup."""
-    st = st or a.st
-    if a.drd is None or a.status not in ("confirmed", "retest"):
-        return f"{a.symbol}: no confirmed setup, so no entry plan."
-    bull = a.drd.direction == "bull"
-    h1c = [c for c in h1 if not market_closed(c.time) and c.time + timedelta(hours=1) <= a.as_of][-400:]
-    atr1 = atr_series(h1c, st.atr_period)
-    price = a.price
-    levels = build_levels(h1c, atr1, st, upto=len(h1c))
-    side = "buy" if bull else "sell"
-    cand = [lv for lv in levels if lv.side == side and lv.state == "live"
-            and ((bull and lv.hi <= price) or (not bull and lv.lo >= price))]
-    if not cand:
-        return f"{a.symbol}: no H1 {side} level found between the setup and price."
-    lv = min(cand, key=lambda l: l.distance(price))
-    buf = st.stop_buffer_atr * atr1[-1]
-    if bull:
-        entry, stop = lv.hi, lv.lo - buf
-    else:
-        entry, stop = lv.lo, lv.hi + buf
-    tgt = a.liquidity.erl.price if a.liquidity.erl else None
-    risk = abs(entry - stop)
-    lines = [f"{a.symbol} {'buy' if bull else 'sell'} plan (not advice, your call)",
-             f"Zone: {_fmt(lv.lo)}-{_fmt(lv.hi)} ({lv.label}, H1)",
-             f"Entry: {_fmt(entry)} when an H1 candle closes away from the zone",
-             f"Stop: {_fmt(stop)}"]
-    if tgt is not None and risk > 0:
-        rr = abs(tgt - entry) / risk
-        lines.append(f"Target: {_fmt(tgt)} ({a.liquidity.erl.label}) · R:R {rr:.1f}" + ("" if rr >= st.rr_min else f" (below {st.rr_min:.0f})"))
-    else:
-        lines.append("Target: no external liquidity found")
-    lines.append("Inducement (IDM): not checked by the radar yet. Look on H1 for a minor swing high/low taken just before the rejection.")
-    lines.append(f"Cancel if: an H4 candle closes {'below' if bull else 'above'} {_fmt(a.h4_result.bo_swing.price)}, or the Daily level is disrespected.")
+    side = "BUY" if a.drd.direction == "bull" else "SELL"
+    lo, hi = r.rej_lo, r.rej_hi
+    level = _fmt(lo) if lo is None or hi is None or abs(hi - lo) < 1e-9 else f"{_fmt(lo)} - {_fmt(hi)}"
+    lines = ["🔁 SLK H4 R H4", f"Pair: {a.symbol}", f"Direction: {side}",
+             f"H4 Level Rejected: {level}",
+             f"Time: {_when(a.h4[r.rej_index].end, a.st)} Lagos",
+             "Status: Now look for a lower timeframe entry"]
+    if a.liquidity.erl:
+        lines.append(f"Target still: {_fmt(a.liquidity.erl.price)} ({a.liquidity.erl.label})")
     return "\n".join(lines)
+
+
+retest_text = h4rh4_text      # old name
+
+
+def cancelled_text(symbol: str, direction: str, reason: str, when: datetime, st: Settings) -> str:
+    side = "BUY" if direction == "bull" else "SELL"
+    return "\n".join(["❌ SLK CANCELLED", f"Pair: {symbol}", f"Direction: {side}", f"Reason: {reason}",
+                      f"Time: {_when(when, st)} Lagos"])
+
+
+def target_text(symbol: str, direction: str, target: float, when: datetime, st: Settings) -> str:
+    side = "BUY" if direction == "bull" else "SELL"
+    return "\n".join(["✅ SLK TARGET REACHED", f"Pair: {symbol}", f"Direction: {side}",
+                      f"Target: {_fmt(target)}", f"Time: {_when(when, st)} Lagos"])

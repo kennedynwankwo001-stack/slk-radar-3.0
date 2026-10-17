@@ -5,8 +5,10 @@
   bear DRD). Internal is enough. A swing already broken before is not a reference.
 - The swing that was broken is the "confirming swing". An H4 body close back through it,
   against the bias, cancels the setup (rule 3).
-- H4 rejection after the BO: within `h4_rejection_window` H4 candles after the BO, an H4 candle
-  closes rejecting the broken swing (retest) or any H4 key level on the right side.
+- H4 R H4 (required stage after the BO): within `h4_rejection_window` H4 candles after the BO, an
+  H4 candle closes rejecting the broken swing (retest) or any H4 key level on the right side.
+- External: the broken swing is the furthest H4 swing of the last 30 H4 candles (used to rank
+  setups and shown in the alert; an internal breakout is still accepted).
 - H4 sweep (info): before the BO, an H4 wick took the extreme of the Daily level or an H4 swing
   and the candle closed back.
 """
@@ -39,6 +41,9 @@ class H4Result:
     sweep_text: str | None = None
     rej_index: int | None = None
     rej_text: str | None = None
+    rej_lo: float | None = None       # the H4 level that was rejected (lo == hi for a broken swing)
+    rej_hi: float | None = None
+    external: bool = False            # the broken swing was the furthest H4 swing of the last 30 H4 candles
 
 
 def confirm(h4: list[Candle], atr4: list[float], st: Settings, drd: DRD, drd_end: datetime) -> H4Result:
@@ -68,6 +73,9 @@ def confirm(h4: list[Candle], atr4: list[float], st: Settings, drd: DRD, drd_end
         return H4Result("waiting")
 
     res = H4Result("confirmed", bo_index=bo, bo_swing=ref)
+    kind = "high" if bull else "low"
+    near = [s for s in sw if s.kind == kind and bo - 30 <= s.index < bo and s.confirmed_at <= bo]
+    res.external = all((ref.price >= s.price) if bull else (ref.price <= s.price) for s in near)
 
     # cancellation: H4 body close back through the confirming swing, against the bias
     for k in range(bo + 1, len(h4)):
@@ -106,15 +114,18 @@ def confirm(h4: list[Candle], atr4: list[float], st: Settings, drd: DRD, drd_end
         retest = Level("SWING", side, ref.price - r, ref.price + r, ref.index, ref.index)
         g = reaction_grade(retest, x, atr4[j], st)
         text = f"retest of the broken swing {ref.price:.5f}"
+        lo, hi = ref.price, ref.price
         if g is None:
             for lv in build_levels(h4, atr4, st, upto=j):
                 if lv.side == side and valid_for_drd(lv, j, st, None):
                     g = reaction_grade(lv, x, atr4[j], st)
                     if g:
                         text = f"H4 {lv.label} {lv.lo:.5f}-{lv.hi:.5f}"
+                        lo, hi = lv.lo, lv.hi
                         break
         if g:
             res.rej_index, res.rej_text = j, text
+            res.rej_lo, res.rej_hi = lo, hi
             if res.status != "cancelled":
                 res.status = "retest"
             break

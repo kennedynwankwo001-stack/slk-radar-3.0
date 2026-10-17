@@ -1,21 +1,25 @@
 """The live scan: after each H4 close, read every pair, send each new stage once.
 
 Stages per setup (each sent once, remembered in State):
-  early      Strong DRD on the still-open Daily candle + H4 breakout (Daily not closed yet)
-  confirmed  Strong/Medium DRD on a closed Daily candle + H4 body-close breakout
-  retest     H4 rejection after the breakout
-  reminder   next Daily close: still valid or broken
-Plus one watchlist message per Daily close: the 3 best developing setups (not confirmed).
+  early      clean DRD on the still-open Daily candle + closed H4 BO (Daily not closed yet)
+  confirmed  clean DRD on a closed Daily candle + closed H4 BO  -> bias alert, starts the wait
+             (at most `max_alerts_per_day` per Daily day, best first)
+  h4rh4      H4 Reject H4 after the BO (only for setups that were alerted) -> the stage you wait for
+  cancelled  the setup died (3 rules) before its target
+  target     the target was reached
+Plus one daily summary at each Daily close, and a weekly scorecard at the Friday close.
 """
 from __future__ import annotations
 
 import time
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from .candles import latest_daily_boundary, latest_h4_boundary
 from .notify import NotifyError
 from .pairs import PAIRS
-from .radar import Analysis, alert_text, analyze, reminder_text, retest_text
+from . import results as res_mod
+from .radar import Analysis, alert_text, analyze, cancelled_text, h4rh4_text, target_text
 from .settings import Settings
 from .state import State
 
@@ -30,14 +34,24 @@ def _late(now: datetime, t: datetime | None) -> str:
     return f"\n⚠️ Sent {m // 60}h {m % 60}m after the candle closed (late run). Check price before acting."
 
 
-def _watch_text(items: list[Analysis]) -> str:
-    if not items:
-        return "SLK RADAR · watching: nothing developing right now (no Strong/Medium DRD waiting for an H4 breakout)."
-    lines = ["👀 SLK RADAR · watching, not confirmed yet"]
-    for a in items:
+def _summary_text(day: datetime, active: list, watching: list, st: Settings) -> str:
+    """One message at each Daily close."""
+    lines = [f"📋 SLK RADAR · daily summary · {day.astimezone(ZoneInfo(st.display_tz)):%a %d %b}"]
+    if not (active or watching):
+        lines += ["", "Nothing active and nothing developing right now."]
+        return "\n".join(lines)
+
+    def row(a: Analysis, tail: str) -> str:
         d = a.drd
         arrow = "🟢" if d.direction == "bull" else "🔴"
-        lines.append(f"{arrow} {a.symbol} {a.bias}: {d.grade} {d.score}/5 at {d.level.lo:.5f}-{d.level.hi:.5f}, waiting for the H4 breakout")
+        return f"{arrow} {a.symbol} {'buy' if d.direction == 'bull' else 'sell'}{' · sweep' if d.sweep else ''}{tail}"
+
+    if active:
+        lines += ["", "STILL VALID (alerted before)"]
+        lines += [row(a, " · H4 R H4 done" if a.status == "retest" else " · waiting for H4 R H4") for a in active]
+    if watching:
+        lines += ["", "WATCHING (no H4 BO yet)"]
+        lines += [row(a, "") for a in watching]
     return "\n".join(lines)
 
 
@@ -82,6 +96,8 @@ def run_scan(
         sent += 1
         return True
 
+    cands: list[tuple[Analysis, str]] = []      # new bias alerts waiting for the daily cap
+    h4r4: list[Analysis] = []
     for n, pair in enumerate(todo):
         if n and spacing:
             sleep(spacing)
@@ -98,48 +114,90 @@ def run_scan(
             continue
         key = a.setup_key
         fresh = a.bo_time is not None and a.bo_time >= boundary - timedelta(hours=4 * STALE_H4)
-        ok = True
         if a.forming:
-            if st.early_alert and d.grade == st.early_min_grade and fresh and not state.was_sent(key + "|confirmed"):
-                r = send(key + "|early", alert_text(a) + _late(now, a.bo_time))
-                ok = r is not None
-                if r:
-                    state.add_setup(key, pair, now)
+            if st.early_alert and fresh and not state.was_sent(key + "|confirmed") and not state.was_sent(key + "|early"):
+                cands.append((a, "early"))
         else:
             if state.was_sent(key + "|early"):
                 state.mark_sent(key + "|confirmed", now)          # already told; the Daily candle held
-            elif fresh:
-                r = send(key + "|confirmed", alert_text(a) + _late(now, a.bo_time))
-                ok = r is not None
-                if r:
-                    state.add_setup(key, pair, now)
-            else:
-                state.mark_sent(key + "|confirmed", now)          # old breakout: no flood after downtime
-            if a.status == "retest" and a.h4_result.rej_index is not None:
-                if a.h4[a.h4_result.rej_index].end >= boundary - timedelta(hours=4 * STALE_H4):
-                    ok = ok and send(key + "|retest", retest_text(a) + _late(now, a.h4[a.h4_result.rej_index].end)) is not None
+            elif not state.was_sent(key + "|confirmed"):
+                if fresh:
+                    cands.append((a, "confirmed"))
                 else:
-                    state.mark_sent(key + "|retest", now)
-        if not ok:
-            failed.append(pair)
+                    state.mark_sent(key + "|confirmed", now)      # old breakout: no flood after downtime
+            if a.status == "retest" and a.h4_result.rej_index is not None:
+                h4r4.append(a)
+
+    # bias alerts: best first, at most `max_alerts_per_day` per Daily day
+    day = latest_daily_boundary(now)
+    room = max(0, st.max_alerts_per_day - state.day_count(day))
+    for a, stage in sorted(cands, key=lambda x: x[0].rank_key, reverse=True):
+        if not baseline and room <= 0:
+            log(f"{a.symbol}: daily cap of {st.max_alerts_per_day} reached, not sent")
+            continue
+        r = send(a.setup_key + "|" + stage, alert_text(a) + _late(now, a.bo_time))
+        if r is None:
+            failed.append(a.symbol)
+        elif r:
+            state.add_setup(a.setup_key, a.symbol, now, res_mod.setup_info(a))
+            state.bump_day(day)
+            room -= 1
+
+    # H4 R H4: only for setups that were alerted
+    for a in h4r4:
+        key = a.setup_key
+        if not state.has_setup(key):
+            continue
+        t = a.h4[a.h4_result.rej_index].end
+        if t >= boundary - timedelta(hours=4 * STALE_H4):
+            if send(key + "|h4rh4", h4rh4_text(a) + _late(now, t)) is None:
+                failed.append(a.symbol)
+        else:
+            state.mark_sent(key + "|h4rh4", now)
+
+    # results: cancelled / target reached / expired
+    for key, v in list(state.data["setups"].items()):
+        if not v.get("notified") or v.get("closed") or "bo_end" not in v:
+            continue
+        a = analyses.get(v["symbol"])
+        if a is None:
+            continue
+        out = res_mod.evaluate(v, key, a, now, st)
+        if out is None:
+            continue
+        outcome, when, reason, price = out
+        if outcome == "win":
+            r = send("res|" + key, target_text(v["symbol"], v["direction"], price, when, st))
+        elif outcome == "loss":
+            r = send("res|" + key, cancelled_text(v["symbol"], v["direction"], reason, when, st))
+        else:
+            r = True
+        if r is None:
+            failed.append(v["symbol"])
+            continue
+        state.close_setup(key, outcome, now)
 
     if daily_close and not failed:
         dboundary = latest_daily_boundary(now)
+        active = []
         for key, v in state.due_reminders(dboundary):
             a = analyses.get(v["symbol"])
             if a is None:
                 continue
-            if a.setup_key == key:
-                text = reminder_text(a)
-            else:
-                text = f"SLK RADAR reminder · {v['symbol']}: the earlier setup is no longer active (cancelled, or replaced by a new Daily signal)."
-            if send(key + "|reminder", text) is not None:
-                state.mark_reminded(key)
-        best = sorted(
+            if a.setup_key == key and a.status in ("confirmed", "retest"):
+                active.append(a)
+            state.mark_reminded(key)
+        watching = sorted(
             [a for a in analyses.values() if a.status == "watching" and a.drd and a.drd.actionable],
-            key=lambda a: (-a.drd.score, a.symbol),
+            key=lambda a: (-int(a.drd.sweep), a.symbol),
         )[:3]
-        send("watch|" + dboundary.astimezone(timezone.utc).isoformat(), _watch_text(best))
+        tag = dboundary.astimezone(timezone.utc).isoformat()
+        if baseline:
+            state.mark_sent("watch|" + tag, now)
+        else:
+            send("watch|" + tag, _summary_text(dboundary, active, watching, st))
+            if dboundary.astimezone(ZoneInfo(st.daily_close_tz)).weekday() == 4:   # Friday close: the week is over
+                send("score|" + tag, res_mod.scorecard_text(state, now, st))
 
     if baseline and not failed:
         try:

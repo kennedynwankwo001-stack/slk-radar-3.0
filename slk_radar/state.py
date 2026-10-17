@@ -14,7 +14,7 @@ def _iso(t: datetime) -> str:
 class State:
     def __init__(self, path: str):
         self.path = path
-        self.data: dict = {"sent": {}, "setups": {}, "last_boundary": None, "retry": []}
+        self.data: dict = {"sent": {}, "setups": {}, "last_boundary": None, "retry": [], "days": {}, "results": []}
         self.is_new = not os.path.exists(path)
         if not self.is_new:
             with open(path) as f:
@@ -28,8 +28,32 @@ class State:
         self.data["sent"][key] = _iso(when)
 
     # ---- setups waiting for a reminder
-    def add_setup(self, key: str, symbol: str, when: datetime) -> None:
-        self.data["setups"].setdefault(key, {"symbol": symbol, "alerted": _iso(when), "reminded": False, "notified": True})
+    def add_setup(self, key: str, symbol: str, when: datetime, info: dict | None = None) -> None:
+        v = {"symbol": symbol, "alerted": _iso(when), "reminded": False, "notified": True}
+        v.update(info or {})
+        self.data["setups"].setdefault(key, v)
+
+    def has_setup(self, key: str) -> bool:
+        v = self.data["setups"].get(key)
+        return bool(v and v.get("notified") and not v.get("closed"))
+
+    def close_setup(self, key: str, outcome: str, when: datetime) -> None:
+        """Move a setup to the results list (kept for the scorecard)."""
+        v = self.data["setups"].pop(key, None)
+        if v is None:
+            return
+        self.data.setdefault("results", []).append({
+            "key": key, "symbol": v["symbol"], "direction": v.get("direction"), "alerted": v["alerted"],
+            "closed": _iso(when), "outcome": outcome, "sweep": v.get("sweep"), "external": v.get("external")})
+        self.data["results"] = self.data["results"][-500:]
+
+    # ---- alerts per Daily day (the daily cap)
+    def day_count(self, day: datetime) -> int:
+        return self.data.setdefault("days", {}).get(_iso(day), 0)
+
+    def bump_day(self, day: datetime) -> None:
+        d = self.data.setdefault("days", {})
+        d[_iso(day)] = d.get(_iso(day), 0) + 1
 
     def due_reminders(self, daily_boundary: datetime) -> list[tuple[str, dict]]:
         """Setups alerted before the latest Daily close that have not been reminded yet."""
@@ -64,6 +88,7 @@ class State:
         cut = _iso(now - timedelta(days=days))
         self.data["sent"] = {k: v for k, v in self.data["sent"].items() if v >= cut}
         self.data["setups"] = {k: v for k, v in self.data["setups"].items() if v["alerted"] >= cut}
+        self.data["days"] = {k: v for k, v in self.data.get("days", {}).items() if k >= cut}
 
     def save(self) -> None:
         os.makedirs(os.path.dirname(os.path.abspath(self.path)), exist_ok=True)
