@@ -1,21 +1,19 @@
 """H4 confirmation of a DRD: sweep (info), breakout, rejection after the breakout, cancellation.
 
-- H4 breakout (BO): after the DRD candle has closed, an H4 candle BODY closes beyond the latest
-  unbroken confirmed H4 swing in the DRD direction (swing high for a bull DRD, swing low for a
-  bear DRD). Internal is enough. A swing already broken before is not a reference.
+- H4 breakout (BO): after the DRD candle has closed, an H4 candle BODY closes beyond the last H4
+  swing made BEFORE the Daily level was touched (swing high for a bull DRD, swing low for a bear
+  DRD). That is the external breakout; internal swings never count (MSNR/SLK rule).
 - The swing that was broken is the "confirming swing". An H4 body close back through it,
   against the bias, cancels the setup (rule 3).
 - H4 R H4 (required stage after the BO): within `h4_rejection_window` H4 candles after the BO, an
   H4 candle closes rejecting the broken swing (retest) or any H4 key level on the right side.
-- External: the broken swing is the furthest H4 swing of the last 30 H4 candles (used to rank
-  setups and shown in the alert; an internal breakout is still accepted).
 - H4 sweep (info): before the BO, an H4 wick took the extreme of the Daily level or an H4 swing
   and the candle closed back.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from ..models import Candle, Swing
 from ..settings import Settings
@@ -49,33 +47,35 @@ class H4Result:
 def confirm(h4: list[Candle], atr4: list[float], st: Settings, drd: DRD, drd_end: datetime) -> H4Result:
     bull = drd.direction == "bull"
     sw = h4_swings(h4, st)
-    by_conf: dict[int, list[Swing]] = {}
-    for s in sw:
-        by_conf.setdefault(s.confirmed_at, []).append(s)
-
-    open_h: list[Swing] = []
-    open_l: list[Swing] = []
+    # The reference swing is the last swing made BEFORE the Daily level was touched (SLK external
+    # breakout). Swings formed after the touch, inside the move, are internal and never count.
+    lvl = drd.level
+    tol = st.touch_atr * atr4[-1]
+    window = [k for k, x in enumerate(h4) if drd_end - timedelta(hours=24) <= x.time < drd_end]
+    touch = None
+    for k in window:
+        x = h4[k]
+        if (bull and x.low <= lvl.hi + tol) or (not bull and x.high >= lvl.lo - tol):
+            touch = k
+            break
+    if touch is None:
+        if not window:
+            return H4Result("waiting")
+        touch = min(window, key=lambda k: h4[k].low) if bull else max(window, key=lambda k: h4[k].high)
+    kind = "high" if bull else "low"
+    before = [s for s in sw if s.kind == kind and s.index < touch]
+    if not before:
+        return H4Result("waiting")
+    ref = max(before, key=lambda s: s.index)
     bo: int | None = None
-    ref: Swing | None = None
     for k, x in enumerate(h4):
-        for s in by_conf.get(k, []):
-            (open_h if s.kind == "high" else open_l).append(s)
-        if bo is None and x.time >= drd_end:
-            pool = open_h if bull else open_l
-            if pool:
-                r = max(pool, key=lambda s: s.index)
-                if (bull and x.close > r.price) or (not bull and x.close < r.price):
-                    bo, ref = k, r
-        open_h = [s for s in open_h if x.close <= s.price]
-        open_l = [s for s in open_l if x.close >= s.price]
-
-    if bo is None or ref is None:
+        if x.time >= drd_end and k > ref.index and ((bull and x.close > ref.price) or (not bull and x.close < ref.price)):
+            bo = k
+            break
+    if bo is None:
         return H4Result("waiting")
 
-    res = H4Result("confirmed", bo_index=bo, bo_swing=ref)
-    kind = "high" if bull else "low"
-    near = [s for s in sw if s.kind == kind and bo - 30 <= s.index < bo and s.confirmed_at <= bo]
-    res.external = all((ref.price >= s.price) if bull else (ref.price <= s.price) for s in near)
+    res = H4Result("confirmed", bo_index=bo, bo_swing=ref, external=True)
 
     # cancellation: H4 body close back through the confirming swing, against the bias
     for k in range(bo + 1, len(h4)):
@@ -85,7 +85,6 @@ def confirm(h4: list[Candle], atr4: list[float], st: Settings, drd: DRD, drd_end
             break
 
     # H4 sweep (info) in the 12 H4 candles before the BO
-    lvl = drd.level
     for j in range(bo - 1, max(-1, bo - 13), -1):
         x = h4[j]
         if bull and x.low < lvl.lo and x.close >= lvl.lo:

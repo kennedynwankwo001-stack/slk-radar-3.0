@@ -19,7 +19,7 @@ from .candles import latest_daily_boundary, latest_h4_boundary
 from .notify import NotifyError
 from .pairs import PAIRS
 from . import results as res_mod
-from .radar import Analysis, alert_text, analyze, cancelled_text, h4rh4_text, target_text
+from .radar import Analysis, _fmt, _when, alert_text, analyze, cancelled_text, h4rh4_text, target_text
 from .settings import Settings
 from .state import State
 
@@ -32,6 +32,47 @@ def _late(now: datetime, t: datetime | None) -> str:
         return ""
     m = int((now - t).total_seconds() // 60)
     return f"\n⚠️ Sent {m // 60}h {m % 60}m after the candle closed (late run). Check price before acting."
+
+
+def board_row(a: Analysis) -> dict | None:
+    """One line of the board: a completed storyline (DRD + external H4 BO) that is still alive,
+    or a DRD still waiting for its H4 BO. None if there is nothing to show for this pair."""
+    d = a.drd
+    if d is None or not d.actionable or a.status == "cancelled":
+        return None
+    bull = d.direction == "bull"
+    base = {"symbol": a.symbol, "dir": d.direction, "sweep": bool(d.sweep),
+            "level": f"{_fmt(d.level.lo)}-{_fmt(d.level.hi)}"}
+    if a.status == "watching":
+        return {**base, "kind": "watching"}
+    if a.status not in ("confirmed", "retest") or a.bo_time is None:
+        return None
+    tgt = a.target[0] if a.target else None
+    if tgt is not None and any(c.end > a.bo_time and ((bull and c.high >= tgt) or (not bull and c.low <= tgt)) for c in a.h4):
+        return None                                                   # target already reached
+    return {**base, "kind": "active", "bo": _when(a.bo_time, a.st), "target": tgt,
+            "h4rh4": a.status == "retest"}
+
+
+def board_line(r: dict) -> str:
+    arrow = "🟢" if r["dir"] == "bull" else "🔴"
+    head = f"{arrow} {r['symbol']} {'buy' if r['dir'] == 'bull' else 'sell'}{' · sweep' if r['sweep'] else ''} · Daily {r['level']}"
+    if r["kind"] == "watching":
+        return head + " · waiting for H4 BO"
+    tail = f" · BO {r['bo']}" + (f" · target {_fmt(r['target'])}" if r.get("target") else "")
+    return head + tail + (" · H4 R H4 done" if r["h4rh4"] else " · waiting for H4 R H4")
+
+
+def board_text(rows: list[dict], kind: str, updated: str | None) -> str:
+    rows = [r for r in rows if r["kind"] == kind]
+    title = "📡 SLK RADAR · completed storylines" if kind == "active" else "👀 SLK RADAR · DRD waiting for H4 breakout"
+    if not rows:
+        return title + "\n\nNone right now."
+    rows.sort(key=lambda r: (-int(r["sweep"]), r["symbol"]))
+    out = [title, ""] + [board_line(r) for r in rows]
+    if updated:
+        out += ["", f"As of the scan at {updated}"]
+    return "\n".join(out)
 
 
 def _summary_text(day: datetime, active: list, watching: list, st: Settings) -> str:
@@ -149,8 +190,16 @@ def run_scan(
         if not state.has_setup(key):
             continue
         t = a.h4[a.h4_result.rej_index].end
+        v = state.data["setups"][key]
+        tgt = v.get("target")
+        bo_end = datetime.fromisoformat(v["bo_end"]) if v.get("bo_end") else None
+        bull = v.get("direction") == "bull"
+        if tgt is not None and bo_end is not None and any(
+                c.end > bo_end and ((bull and c.high >= tgt) or (not bull and c.low <= tgt)) for c in a.h4):
+            state.mark_sent(key + "|h4rh4", now)             # target already reached: no H4 R H4 after the move
+            continue
         if t >= boundary - timedelta(hours=4 * STALE_H4):
-            if send(key + "|h4rh4", h4rh4_text(a) + _late(now, t)) is None:
+            if send(key + "|h4rh4", h4rh4_text(a, v) + _late(now, t)) is None:
                 failed.append(a.symbol)
         else:
             state.mark_sent(key + "|h4rh4", now)
@@ -199,9 +248,18 @@ def run_scan(
             if dboundary.astimezone(ZoneInfo(st.daily_close_tz)).weekday() == 4:   # Friday close: the week is over
                 send("score|" + tag, res_mod.scorecard_text(state, now, st))
 
+    rows = [r for r in (board_row(a) for a in analyses.values()) if r]
+    old = {r["symbol"]: r for r in state.data.get("board", []) if r["symbol"] not in analyses}
+    state.data["board"] = rows + list(old.values())
+    state.data["scan_info"] = {"at": _when(now, st), "boundary": b_iso, "ok": len(todo) - len(failed), "total": len(todo),
+                               "failed": list(failed)}
     if baseline and not failed:
         try:
-            notifier.send("✅ SLK Radar is on. Starting point saved. Alerts begin from the next H4 close.")
+            msg = "✅ SLK Radar is on. Starting point saved. New alerts begin from the next H4 close."
+            if any(r["kind"] == "active" for r in rows):
+                act = sorted((r for r in rows if r["kind"] == "active"), key=lambda r: (-int(r["sweep"]), r["symbol"]))
+                msg += "\n\nAlready completed and still alive:\n" + "\n".join(board_line(r) for r in act)
+            notifier.send(msg)
         except NotifyError as e:
             log(f"send failed: {e}")
 

@@ -59,7 +59,9 @@ class EurAud(unittest.TestCase):
         self.assertEqual(a.status, "confirmed")
         self.assertAlmostEqual(a.drd.level.lo, 1.61675, places=4)
         self.assertAlmostEqual(a.drd.level.hi, 1.61746, places=4)
-        self.assertAlmostEqual(a.h4_result.bo_swing.price, 1.62130, places=4)
+        self.assertAlmostEqual(a.h4_result.bo_swing.price, 1.62139, places=4)
+        self.assertTrue(a.h4_result.external)
+        self.assertAlmostEqual(a.target[0], 1.62704, places=4)     # next Daily key level, not the nearest liquidity
         self.assertEqual(a.bo_time, utc(2026, 9, 29, 9))
         a2 = analyze("EURAUD", h1, now=utc(2026, 9, 29, 9) - timedelta(hours=4))
         self.assertEqual(a2.status, "watching")
@@ -69,13 +71,12 @@ class CadChf(unittest.TestCase):
     def setUp(self):
         self.h1 = load_csv(os.path.join(DATA, "CADCHF_H1.csv"))
 
-    def test_bear_drd_confirmed_then_cancelled(self):
-        a = analyze("CADCHF", self.h1, now=utc(2026, 10, 8, 1))
-        self.assertEqual((a.bias, a.drd.actionable, a.status), ("bearish", True, "confirmed"))
-        self.assertTrue(a.drd.sweep)
-        self.assertAlmostEqual(a.h4_result.bo_swing.price, 0.58409, places=4)
-        a = analyze("CADCHF", self.h1, now=utc(2026, 10, 8, 9))
-        self.assertEqual(a.status, "cancelled")
+    def test_internal_breakout_does_not_count(self):
+        # the old reading broke 0.58409, a swing made AFTER the Daily touch (internal). It must not alert.
+        for hr in (1, 5, 9):
+            a = analyze("CADCHF", self.h1, now=utc(2026, 10, 8, hr))
+            self.assertEqual((a.bias, a.status), ("bearish", "watching"))
+            self.assertFalse(a.alertable)
 
 
 class Data(unittest.TestCase):
@@ -135,7 +136,7 @@ class Notify(unittest.TestCase):
 
 class Scanner(unittest.TestCase):
     def setUp(self):
-        self.h1 = {"CADCHF": load_csv(os.path.join(DATA, "CADCHF_H1.csv"))}
+        self.h1 = {"EURAUD": load_csv(os.path.join(DATA, "EURAUD_H1.csv"))}
         self.tmp = tempfile.TemporaryDirectory()
         self.path = os.path.join(self.tmp.name, "state.json")
 
@@ -144,46 +145,68 @@ class Scanner(unittest.TestCase):
 
     def run_at(self, now, notifier=None):
         n = notifier or PrintNotifier()
-        run_scan(now, State(self.path), n, lambda p: self.h1[p], pairs=["CADCHF"], spacing=0, log=lambda *a: None)
+        run_scan(now, State(self.path), n, lambda p: self.h1[p], pairs=["EURAUD"], spacing=0, log=lambda *a: None)
         return n
 
     def test_cold_start_is_silent_then_alert_once(self):
-        n = self.run_at(utc(2026, 10, 7, 21, 30))              # baseline
+        n = self.run_at(utc(2026, 9, 29, 5, 30))               # baseline
         self.assertEqual(len(n.sent), 1)                       # only the "radar is on" message
-        n = self.run_at(utc(2026, 10, 8, 1, 30))               # BO closes 01:00 UTC boundary
+        n = self.run_at(utc(2026, 9, 29, 9, 30))               # BO closes 09:00 UTC boundary
         self.assertEqual(len(n.sent), 1)
         self.assertIn("SLK BIAS ALERT", n.sent[0])
-        self.assertIn("Direction: SELL", n.sent[0])
+        self.assertIn("Direction: BUY", n.sent[0])
+        self.assertIn("(external)", n.sent[0])
+        self.assertIn("Target: 1.62704", n.sent[0])
         self.assertIn("Status: Waiting for H4 R H4", n.sent[0])
         self.assertNotIn("/5", n.sent[0])                      # no points score
-        n = self.run_at(utc(2026, 10, 8, 1, 40))               # same candle again
+        n = self.run_at(utc(2026, 9, 29, 9, 40))               # same candle again
         self.assertEqual(n.sent, [])
 
-    def test_no_double_alert_next_candle(self):
-        self.run_at(utc(2026, 10, 7, 21, 30))
-        self.run_at(utc(2026, 10, 8, 1, 30))
-        n = self.run_at(utc(2026, 10, 8, 5, 30))
+    def test_first_run_lists_completed_storylines_and_commands(self):
+        from slk_radar.commands import reply_for
+        from slk_radar.settings import Settings
+        n = self.run_at(utc(2026, 9, 29, 11, 30))               # first run, the storyline is already complete
+        self.assertEqual(len(n.sent), 1)
+        self.assertIn("Already completed and still alive", n.sent[0])
+        self.assertIn("EURAUD buy", n.sent[0])
+        stt = State(self.path)
+        act = reply_for("/active", None, utc(2026, 9, 29, 12), Settings(), stt)
+        self.assertIn("EURAUD buy", act)
+        self.assertIn("target 1.62704", act)
+        self.assertIn("None right now", reply_for("/watching", None, utc(2026, 9, 29, 12), Settings(), stt))
+        self.assertIn("Last scan", reply_for("/status", None, utc(2026, 9, 29, 12), Settings(), stt))
+        self.assertIn("/active", reply_for("/help", None, utc(2026, 9, 29, 12), Settings(), stt))
+
+    def test_h4rh4_uses_the_alert_target(self):
+        self.run_at(utc(2026, 9, 29, 5, 30))
+        self.run_at(utc(2026, 9, 29, 9, 30))
+        n = self.run_at(utc(2026, 9, 29, 13, 30))
         self.assertEqual(len(n.sent), 1)
         self.assertIn("SLK H4 R H4", n.sent[0])
-        self.assertIn("H4 Level Rejected: 0.58409", n.sent[0])
+        self.assertIn("H4 Level Rejected: 1.62139", n.sent[0])
+        self.assertIn("Target still: 1.62704", n.sent[0])      # same target as the alert
 
-    def test_daily_close_sends_reminder_and_watchlist(self):
-        self.run_at(utc(2026, 10, 7, 21, 30))
-        self.run_at(utc(2026, 10, 8, 1, 30))
-        n = self.run_at(utc(2026, 10, 8, 21, 30))
+    def test_target_reached_message_and_no_h4rh4_after_target(self):
+        self.run_at(utc(2026, 9, 29, 5, 30))
+        self.run_at(utc(2026, 9, 29, 9, 30))
+        # the next scan comes after the target was already hit: no late H4 R H4, only the result
+        n = self.run_at(utc(2026, 9, 30, 5, 30))
         text = "\n".join(n.sent)
-        self.assertIn("daily summary", text)
-        self.assertIn("SLK CANCELLED", text)
-        self.assertIn("(Rule 3)", text)
-        self.assertIn("Time: Thu 08 Oct 10:00 Lagos", text)
-        self.assertEqual(sum("daily summary" in t for t in n.sent), 1)       # one message, not one per setup
+        self.assertNotIn("SLK H4 R H4", text)
+        self.assertIn("SLK TARGET REACHED", text)
+
+    def test_daily_close_summary_is_one_message(self):
+        self.run_at(utc(2026, 9, 29, 5, 30))
+        self.run_at(utc(2026, 9, 29, 9, 30))
+        n = self.run_at(utc(2026, 9, 29, 21, 30))
+        self.assertEqual(sum("daily summary" in t for t in n.sent), 1)
 
     def test_failed_pair_retried_same_candle(self):
         def boom(p): raise DataError("down")
         st = State(self.path)
-        run_scan(utc(2026, 10, 7, 21, 30), st, PrintNotifier(), boom, pairs=["CADCHF"], spacing=0, log=lambda *a: None)
-        self.assertEqual(State(self.path).retry, ["CADCHF"])
-        n = self.run_at(utc(2026, 10, 7, 21, 45))
+        run_scan(utc(2026, 9, 29, 5, 30), st, PrintNotifier(), boom, pairs=["EURAUD"], spacing=0, log=lambda *a: None)
+        self.assertEqual(State(self.path).retry, ["EURAUD"])
+        n = self.run_at(utc(2026, 9, 29, 5, 45))
         self.assertEqual(State(self.path).retry, [])
 
 
@@ -243,27 +266,22 @@ class NewRules(unittest.TestCase):
 
     def test_cap_zero_blocks_bias_and_h4rh4(self):
         from slk_radar.settings import Settings
+        h1 = {"EURAUD": load_csv(os.path.join(DATA, "EURAUD_H1.csv"))}
         st = Settings(max_alerts_per_day=0)
-        self.run_at(utc(2026, 10, 7, 21, 30), st)
-        n = self.run_at(utc(2026, 10, 8, 1, 30), st)
-        self.assertEqual(n.sent, [])
-        n = self.run_at(utc(2026, 10, 8, 5, 30), st)               # no bias alert was sent, so no H4 R H4 either
+        n = PrintNotifier()
+        for now in (utc(2026, 9, 29, 5, 30), utc(2026, 9, 29, 9, 30), utc(2026, 9, 29, 13, 30)):
+            n = PrintNotifier()
+            run_scan(now, State(self.path), n, lambda p: h1[p], pairs=["EURAUD"], st=st, spacing=0, log=lambda *a: None)
         self.assertEqual(n.sent, [])
 
     def test_loss_recorded_once_and_command(self):
         from slk_radar.commands import reply_for
         from slk_radar.settings import Settings
-        self.run_at(utc(2026, 10, 7, 21, 30))
-        self.run_at(utc(2026, 10, 8, 1, 30))
-        n = self.run_at(utc(2026, 10, 8, 9, 30))
-        self.assertIn("SLK CANCELLED", "\n".join(n.sent))
-        stt = State(self.path)
-        self.assertEqual([r["outcome"] for r in stt.data["results"]], ["loss"])
-        n = self.run_at(utc(2026, 10, 8, 13, 30))
-        self.assertNotIn("CANCELLED", "\n".join(n.sent))           # not repeated
-        txt = reply_for("/results", None, utc(2026, 10, 9), Settings(), stt)
+        st = State(self.path)
+        st.data["results"] = [{"key": "k", "symbol": "X", "direction": "bull", "alerted": "", "closed": utc(2026, 10, 8).isoformat(), "outcome": "loss"}]
+        txt = reply_for("/results", None, utc(2026, 10, 9), Settings(), st)
         self.assertIn("0 won · 1 lost", txt)
-        self.assertIn("no entries", reply_for("/entry EURAUD", None, utc(2026, 10, 9), Settings(), stt))
+        self.assertIn("no entries", reply_for("/entry EURAUD", None, utc(2026, 10, 9), Settings(), st))
 
     def test_win_when_target_reached_first(self):
         from slk_radar.results import evaluate

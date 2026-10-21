@@ -6,7 +6,7 @@ SLK = **S**tructure (direction), **L**iquidity (target), **K**ey levels (decisio
 It runs free on GitHub Actions. No server needed.
 
 ## What you get on Telegram
-- **SLK BIAS ALERT**: DRD confirmed by an H4 breakout (also an "EARLY" version when a clear rejection is still forming on the open Daily candle). At most 4 per Daily day, best first: PDH/PDL sweep, external breakout, most recent.
+- **SLK BIAS ALERT**: DRD confirmed by an H4 breakout (also an "EARLY" version when a clear rejection is still forming on the open Daily candle). At most 4 per Daily day, best first: PDH/PDL sweep, then most recent. Only external H4 breakouts alert (the last H4 swing made before the Daily touch); target = next Daily key level.
 - **SLK H4 R H4**: H4 rejection within 6 H4 candles after the breakout. This is the stage you wait for before looking at the lower timeframe.
 - **SLK CANCELLED** / **TARGET REACHED**: how the setup ended. Results are tracked automatically, with a weekly scorecard on Friday and `/results` any time.
 - **Daily summary**: one message at each Daily close: setups still valid, the 3 best developing ones, and any that broke
@@ -36,3 +36,7 @@ python -m slk_radar replay data/CADCHF_H1.csv --symbol CADCHF --from 2026-10-06 
 python -m unittest discover -s tests -t .
 ```
 H1 files: time in UTC, columns `datetime;open;high;low;close` (Twelve Data CSV works as is). Python 3.10+, no packages to install.
+
+
+## Telegram commands
+/active (completed storylines still alive) · /watching (DRD waiting for the H4 breakout) · /radar PAIR · /results · /status · /help. The first run also lists storylines that are already complete.

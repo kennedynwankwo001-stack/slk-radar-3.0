@@ -25,7 +25,8 @@ def setup_info(a: Analysis) -> dict:
     d, r = a.drd, a.h4_result
     return {
         "direction": d.direction,
-        "target": a.liquidity.erl.price if a.liquidity.erl else None,
+        "target": a.target[0] if a.target else None,
+        "target_label": a.target[1] if a.target else "",
         "swing": r.bo_swing.price,
         "bo_end": _iso(a.bo_time),
         "sweep": bool(d.sweep),

@@ -44,6 +44,7 @@ class Analysis:
     st: Settings = field(default_factory=Settings)
     forming: bool = False              # the DRD comes from the Daily candle that is still open
     forming_candle: Candle | None = None
+    target: tuple | None = None        # (price, label) next Daily key level in the bias direction
 
     # ---- helpers used by the formatters and the scanner
     def day_label(self, i: int) -> str:
@@ -81,6 +82,20 @@ class Analysis:
         d = self.drd
         t = self.bo_time.timestamp() if self.bo_time else 0.0
         return (int(bool(d and d.sweep)), int(self.external), t)
+
+
+def daily_target(levels: list[Level], daily_len: int, st: Settings, direction: str, price: float, atr_d: float):
+    """Target = the next Daily key level on the far side, at least half a Daily ATR away."""
+    bull = direction == "bull"
+    far = 0.5 * atr_d
+    cand = [lv for lv in levels
+            if valid_for_drd(lv, daily_len, st, st.age_limit)
+            and ((bull and lv.side == "sell" and lv.lo > price + far)
+                 or (not bull and lv.side == "buy" and lv.hi < price - far))]
+    if not cand:
+        return None
+    lv = min(cand, key=lambda x: x.lo) if bull else max(cand, key=lambda x: x.hi)
+    return (lv.lo if bull else lv.hi, f"Daily {lv.label} {_fmt(lv.lo)}-{_fmt(lv.hi)}")
 
 
 def _local(t: datetime, st: Settings) -> str:
@@ -155,8 +170,14 @@ def analyze(symbol: str, h1: list[Candle], st: Settings | None = None, now: date
         h4r = h4_mod.confirm(h4, atr4, st, active, drd_end)
         status = {"waiting": "watching", "confirmed": "confirmed", "retest": "retest", "cancelled": "cancelled"}[h4r.status]
 
+    target = None
+    if h4r is not None and h4r.bo_index is not None:
+        target = daily_target(levels, len(daily), st, active.direction, h4[h4r.bo_index].close, atr_d[-1])
+        if target is None and liq.erl is not None:
+            target = (liq.erl.price, liq.erl.label)
     return Analysis(symbol, h4[-1].end, price, daily, h4, atr_d[-1], atr4, structure, scan, active,
-                    bias, source, levels, top, liq, h4r, status, st, forming=forming, forming_candle=forming_c)
+                    bias, source, levels, top, liq, h4r, status, st, forming=forming, forming_candle=forming_c,
+                    target=target)
 
 
 # --------------------------------------------------------------------------- text
@@ -270,7 +291,6 @@ def alert_text(a: Analysis) -> str:
     arrow = "🟢" if d.direction == "bull" else "🔴"
     side = "BUY" if d.direction == "bull" else "SELL"
     bo = a.h4[r.bo_index]
-    L = a.liquidity
     head = f"{arrow} SLK BIAS ALERT" + (" · EARLY (Daily not closed)" if a.forming else "")
     lines = [head, f"Pair: {a.symbol}", f"Direction: {side}",
              f"Daily Level: {_fmt(d.level.lo)} - {_fmt(d.level.hi)} ({d.level.kind} {d.level.side} · {level_tag(d.level)})"]
@@ -283,8 +303,8 @@ def alert_text(a: Analysis) -> str:
         lines.append("Why: " + " + ".join(why))
     lines.append(f"DRD: Daily candle {a.day_label(d.index)}" + (" (still open)" if a.forming else ""))
     lines.append(f"H4 BO: {_fmt(r.bo_swing.price)} ({'external' if r.external else 'internal'}) · {_when(bo.end, a.st)} Lagos")
-    if L.erl:
-        lines.append(f"Target: {_fmt(L.erl.price)} ({L.erl.label})")
+    if a.target:
+        lines.append(f"Target: {_fmt(a.target[0])} ({a.target[1]})")
     lines.append("Status: Waiting for H4 R H4")
     if a.forming:
         lines.append("The Daily candle is still open, this can change.")
@@ -292,7 +312,7 @@ def alert_text(a: Analysis) -> str:
     return "\n".join(lines)
 
 
-def h4rh4_text(a: Analysis) -> str:
+def h4rh4_text(a: Analysis, info: dict | None = None) -> str:
     """H4 Reject H4: the stage you wait for before looking at the lower timeframe."""
     r = a.h4_result
     assert a.drd is not None and r is not None and r.rej_index is not None
@@ -303,8 +323,9 @@ def h4rh4_text(a: Analysis) -> str:
              f"H4 Level Rejected: {level}",
              f"Time: {_when(a.h4[r.rej_index].end, a.st)} Lagos",
              "Status: Now look for a lower timeframe entry"]
-    if a.liquidity.erl:
-        lines.append(f"Target still: {_fmt(a.liquidity.erl.price)} ({a.liquidity.erl.label})")
+    tgt = (info["target"], info.get("target_label", "")) if info and info.get("target") else a.target
+    if tgt:
+        lines.append(f"Target still: {_fmt(tgt[0])}" + (f" ({tgt[1]})" if tgt[1] else ""))
     return "\n".join(lines)
 
 
