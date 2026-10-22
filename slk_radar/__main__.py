@@ -36,7 +36,7 @@ def main(argv=None) -> int:
     rp = sub.add_parser("replay"); rp.add_argument("file"); rp.add_argument("--symbol", required=True)
     rp.add_argument("--from", dest="start", required=True); rp.add_argument("--to", dest="end", required=True)
     s = sub.add_parser("scan"); s.add_argument("--dry-run", action="store_true")
-    s.add_argument("--data-dir", default="radar_data"); s.add_argument("--pairs")
+    s.add_argument("--commands-only", action="store_true"); s.add_argument("--data-dir", default="radar_data"); s.add_argument("--pairs")
     a = p.parse_args(argv)
 
     if a.cmd == "radar":
@@ -80,6 +80,8 @@ def main(argv=None) -> int:
     try:
         if isinstance(notifier, TelegramNotifier):
             handle_commands(notifier, state, get_h1, now)
+        if a.commands_only:                    # answer commands only; never scan or send alerts
+            return 0
         res = run_scan(now, state, notifier, get_h1, pairs=pairs)
     except DataError as e:
         print(f"Data error: {e}", file=sys.stderr)
