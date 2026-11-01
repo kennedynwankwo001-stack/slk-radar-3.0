@@ -79,6 +79,38 @@ class CadChf(unittest.TestCase):
             self.assertFalse(a.alertable)
 
 
+class H4Sweep(unittest.TestCase):
+    """Synthetic sell: Daily level 100-101; the swing low 95 was made before the touch."""
+    T0 = utc(2026, 10, 6, 1)
+    BASE = [(97, 97.5, 96.5, 97), (97, 97.2, 94.8, 95), (95, 98.2, 94.9, 98), (98, 99.8, 97.8, 99.5),
+            (99.5, 100.5, 99.2, 99.9), (99.9, 100.0, 98.5, 98.6)]
+    BO = (98.6, 98.7, 93.5, 94.0)
+
+    def run_rows(self, rows):
+        from types import SimpleNamespace as NS
+        from slk_radar.engine.h4 import confirm
+        from slk_radar.settings import Settings
+        h4 = [Candle(self.T0 + timedelta(hours=4 * i), o, h, l, c, self.T0 + timedelta(hours=4 * i + 4))
+              for i, (o, h, l, c) in enumerate(rows)]
+        drd = NS(direction="bear", level=NS(lo=100.0, hi=101.0))
+        return confirm(h4, [1.0] * len(h4), Settings(), drd, self.T0 + timedelta(hours=20))
+
+    def test_bo_without_sweep_waits(self):
+        r = self.run_rows(self.BASE + [self.BO])
+        self.assertEqual((r.status, r.bo_index, r.sweep_index), ("waiting_sweep", 6, None))
+
+    def test_sweep_before_bo_long_wick(self):
+        rows = list(self.BASE)
+        rows[4] = (99.5, 101.6, 99.2, 99.9)                  # long wick above the level, closes back below
+        r = self.run_rows(rows + [self.BO])
+        self.assertEqual((r.status, r.sweep_index), ("confirmed", 4))
+
+    def test_sweep_after_bo_completes_it(self):
+        rows = self.BASE + [self.BO, (94.0, 95.0, 93.8, 94.6), (94.6, 94.8, 93.6, 93.8), (93.8, 96.0, 93.7, 94.2)]
+        r = self.run_rows(rows)
+        self.assertEqual((r.status, r.sweep_index), ("confirmed", 9))
+
+
 class Data(unittest.TestCase):
     PAY = {"values": [{"datetime": "2026-10-01 10:00:00", "open": "1", "high": "2", "low": "0.5", "close": "1.5"},
                       {"datetime": "2026-10-01 09:00:00", "open": "1", "high": "2", "low": "0.5", "close": "1.2"}]}
@@ -157,7 +189,8 @@ class Scanner(unittest.TestCase):
         self.assertIn("Direction: BUY", n.sent[0])
         self.assertIn("(external)", n.sent[0])
         self.assertIn("Target: 1.62704", n.sent[0])
-        self.assertIn("Status: Waiting for H4 R H4", n.sent[0])
+        self.assertIn("Storyline complete", n.sent[0])
+        self.assertIn("H4 swept the swing low 1.61859", n.sent[0])
         self.assertNotIn("/5", n.sent[0])                      # no points score
         n = self.run_at(utc(2026, 9, 29, 9, 40))               # same candle again
         self.assertEqual(n.sent, [])
@@ -177,22 +210,13 @@ class Scanner(unittest.TestCase):
         self.assertIn("Last scan", reply_for("/status", None, utc(2026, 9, 29, 12), Settings(), stt))
         self.assertIn("/active", reply_for("/help", None, utc(2026, 9, 29, 12), Settings(), stt))
 
-    def test_h4rh4_uses_the_alert_target(self):
+    def test_target_reached_result_is_sent(self):
         self.run_at(utc(2026, 9, 29, 5, 30))
         self.run_at(utc(2026, 9, 29, 9, 30))
-        n = self.run_at(utc(2026, 9, 29, 13, 30))
-        self.assertEqual(len(n.sent), 1)
-        self.assertIn("SLK H4 R H4", n.sent[0])
-        self.assertIn("H4 Level Rejected: 1.62139", n.sent[0])
-        self.assertIn("Target still: 1.62704", n.sent[0])      # same target as the alert
-
-    def test_target_reached_message_and_no_h4rh4_after_target(self):
-        self.run_at(utc(2026, 9, 29, 5, 30))
-        self.run_at(utc(2026, 9, 29, 9, 30))
-        # the next scan comes after the target was already hit: no late H4 R H4, only the result
+        # the next scan comes after the target was already hit: no late H4 sweep, only the result
         n = self.run_at(utc(2026, 9, 30, 5, 30))
         text = "\n".join(n.sent)
-        self.assertNotIn("SLK H4 R H4", text)
+        self.assertNotIn("SLK H4 SWEEP", text)
         self.assertIn("SLK TARGET REACHED", text)
 
     def test_daily_close_summary_is_one_message(self):
@@ -264,7 +288,7 @@ class NewRules(unittest.TestCase):
         run_scan(now, State(self.path), n, lambda p: self.h1[p], pairs=list(pairs), st=st, spacing=0, log=lambda *a: None)
         return n
 
-    def test_cap_zero_blocks_bias_and_h4rh4(self):
+    def test_cap_zero_blocks_bias(self):
         from slk_radar.settings import Settings
         h1 = {"EURAUD": load_csv(os.path.join(DATA, "EURAUD_H1.csv"))}
         st = Settings(max_alerts_per_day=0)

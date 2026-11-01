@@ -6,8 +6,8 @@ SLK = **S**tructure (direction), **L**iquidity (target), **K**ey levels (decisio
 It runs free on GitHub Actions. No server needed.
 
 ## What you get on Telegram
-- **SLK BIAS ALERT**: DRD confirmed by an H4 breakout (also an "EARLY" version when a clear rejection is still forming on the open Daily candle). At most 4 per Daily day, best first: PDH/PDL sweep, then most recent. Only external H4 breakouts alert (the last H4 swing made before the Daily touch); target = next Daily key level.
-- **SLK H4 R H4**: H4 rejection within 6 H4 candles after the breakout. This is the stage you wait for before looking at the lower timeframe.
+- **SLK BIAS ALERT**: DRD + external H4 breakout + H4 sweep (also an "EARLY" version when a clear rejection is still forming on the open Daily candle). At most 4 per Daily day, best first: PDH/PDL sweep, then most recent. Only external H4 breakouts alert (the last H4 swing made before the Daily touch); target = next Daily key level.
+- **Storyline complete** = clean Daily rejection (DRD) + external H4 breakout + H4 sweep (an H4 wick of any length takes liquidity and closes back on the bias side; it can come before or up to 6 H4 candles after the breakout). One alert is sent when all three are done. There is no separate H4 R H4 message.
 - **SLK CANCELLED** / **TARGET REACHED**: how the setup ended. Results are tracked automatically, with a weekly scorecard on Friday and `/results` any time.
 - **Daily summary**: one message at each Daily close: setups still valid, the 3 best developing ones, and any that broke
 

@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 from .candles import load_csv
 from .data import DataError, update_candles
 from .notify import PrintNotifier, TelegramNotifier
-from .radar import alert_text, analyze, h4rh4_text, radar_text
+from .radar import alert_text, analyze, radar_text
 from .commands import handle_commands
 from .scanner import run_scan
 from .state import State
@@ -55,8 +55,6 @@ def main(argv=None) -> int:
                     k = an.setup_key
                     if k + "|c" not in seen and not an.forming:
                         seen.add(k + "|c"); print(f"[{t:%a %d %b %H:%M} UTC]\n{alert_text(an)}\n")
-                    if an.status == "retest" and k + "|r" not in seen:
-                        seen.add(k + "|r"); print(f"[{t:%a %d %b %H:%M} UTC]\n{h4rh4_text(an)}\n")
             t += timedelta(hours=1)
         return 0
 

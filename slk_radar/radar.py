@@ -1,5 +1,5 @@
 """The radar: puts candles, structure, levels, DRD, H4 confirmation and liquidity together and
-formats the radar text and the three messages (bias alert, H4 R H4, cancelled). It never gives entries."""
+formats the radar text and the three messages (bias alert, cancelled, target reached). It never gives entries."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -40,7 +40,7 @@ class Analysis:
     top_levels: list[Level]
     liquidity: liq_mod.LiquidityMap
     h4_result: h4_mod.H4Result | None
-    status: str                        # "no_setup" | "watching" | "confirmed" | "retest" | "cancelled"
+    status: str                        # "no_setup" | "watching" | "bo_wait" | "confirmed" | "cancelled"
     st: Settings = field(default_factory=Settings)
     forming: bool = False              # the DRD comes from the Daily candle that is still open
     forming_candle: Candle | None = None
@@ -68,8 +68,19 @@ class Analysis:
         return None
 
     @property
+    def confirm_time(self) -> datetime | None:
+        """When the storyline became complete: the later of the H4 BO and the H4 sweep."""
+        r = self.h4_result
+        if not r or r.bo_index is None:
+            return None
+        t = self.h4[r.bo_index].end
+        if r.sweep_index is not None:
+            t = max(t, self.h4[r.sweep_index].end)
+        return t
+
+    @property
     def alertable(self) -> bool:
-        return self.status in ("confirmed", "retest") and self.drd is not None and self.drd.actionable
+        return self.status == "confirmed" and self.drd is not None and self.drd.actionable
 
     @property
     def external(self) -> bool:
@@ -80,7 +91,7 @@ class Analysis:
         """Best-first order when more setups qualify than the daily cap allows:
         PDH/PDL sweep, then an external H4 breakout, then the most recent breakout."""
         d = self.drd
-        t = self.bo_time.timestamp() if self.bo_time else 0.0
+        t = self.confirm_time.timestamp() if self.confirm_time else 0.0
         return (int(bool(d and d.sweep)), int(self.external), t)
 
 
@@ -168,7 +179,7 @@ def analyze(symbol: str, h1: list[Candle], st: Settings | None = None, now: date
         if drd_end is None:
             drd_end = daily[active.index].end
         h4r = h4_mod.confirm(h4, atr4, st, active, drd_end)
-        status = {"waiting": "watching", "confirmed": "confirmed", "retest": "retest", "cancelled": "cancelled"}[h4r.status]
+        status = {"waiting": "watching", "waiting_sweep": "bo_wait", "confirmed": "confirmed", "cancelled": "cancelled"}[h4r.status]
 
     target = None
     if h4r is not None and h4r.bo_index is not None:
@@ -221,9 +232,9 @@ def h4_text(a: Analysis) -> str:
     word = "above" if a.drd.direction == "bull" else "below"
     out = f"H4 BO ({'external' if r.external else 'internal'}): H4 body close {word} {_fmt(r.bo_swing.price)} at {_local(bo.end, a.st)} Lagos time"
     if r.sweep_text:
-        out += f"; {r.sweep_text}"
-    if r.rej_text:
-        out += f"; H4 R H4 at {_local(a.h4[r.rej_index].end, a.st)}: {r.rej_text}"
+        out += f"; {r.sweep_text} at {_local(a.h4[r.sweep_index].end, a.st)}"
+    else:
+        out += "; no H4 sweep yet"
     if r.status == "cancelled":
         out += f"; CANCELLED: H4 closed back through {_fmt(r.bo_swing.price)} at {_local(a.h4[r.cancel_index].end, a.st)}"
     return out
@@ -237,10 +248,10 @@ def summary_text(a: Analysis) -> str:
         return f"{word} from Daily structure only. No DRD, no setup."
     if a.status == "watching":
         return f"{word} DRD is active. Waiting for the H4 BO."
+    if a.status == "bo_wait":
+        return f"{word} DRD and H4 BO are done. Waiting for the H4 sweep."
     if a.status == "confirmed":
-        return f"{word} bias confirmed by the H4 BO. Waiting for H4 R H4, no entry yet."
-    if a.status == "retest":
-        return f"{word} bias confirmed and H4 R H4 has closed. You can look for an entry on the lower timeframe."
+        return f"{word} bias confirmed: H4 BO and H4 sweep are done. You can look for an entry on the lower timeframe."
     return f"{word} setup was cancelled by an H4 close against it."
 
 
@@ -285,7 +296,7 @@ def level_tag(lv: Level) -> str:
 
 
 def alert_text(a: Analysis) -> str:
-    """The bias alert: clean DRD + closed H4 BO. It starts the wait for H4 R H4."""
+    """The bias alert: clean DRD + closed H4 BO. DRD + external H4 BO + H4 sweep: the storyline is complete."""
     d, r = a.drd, a.h4_result
     assert d is not None and r is not None and r.bo_index is not None
     arrow = "🟢" if d.direction == "bull" else "🔴"
@@ -305,31 +316,11 @@ def alert_text(a: Analysis) -> str:
     lines.append(f"H4 BO: {_fmt(r.bo_swing.price)} ({'external' if r.external else 'internal'}) · {_when(bo.end, a.st)} Lagos")
     if a.target:
         lines.append(f"Target: {_fmt(a.target[0])} ({a.target[1]})")
-    lines.append("Status: Waiting for H4 R H4")
+    lines.append("Status: Storyline complete. Look for your lower timeframe entry")
     if a.forming:
         lines.append("The Daily candle is still open, this can change.")
     lines.append("Bias only, not an entry signal.")
     return "\n".join(lines)
-
-
-def h4rh4_text(a: Analysis, info: dict | None = None) -> str:
-    """H4 Reject H4: the stage you wait for before looking at the lower timeframe."""
-    r = a.h4_result
-    assert a.drd is not None and r is not None and r.rej_index is not None
-    side = "BUY" if a.drd.direction == "bull" else "SELL"
-    lo, hi = r.rej_lo, r.rej_hi
-    level = _fmt(lo) if lo is None or hi is None or abs(hi - lo) < 1e-9 else f"{_fmt(lo)} - {_fmt(hi)}"
-    lines = ["🔁 SLK H4 R H4", f"Pair: {a.symbol}", f"Direction: {side}",
-             f"H4 Level Rejected: {level}",
-             f"Time: {_when(a.h4[r.rej_index].end, a.st)} Lagos",
-             "Status: Now look for a lower timeframe entry"]
-    tgt = (info["target"], info.get("target_label", "")) if info and info.get("target") else a.target
-    if tgt:
-        lines.append(f"Target still: {_fmt(tgt[0])}" + (f" ({tgt[1]})" if tgt[1] else ""))
-    return "\n".join(lines)
-
-
-retest_text = h4rh4_text      # old name
 
 
 def cancelled_text(symbol: str, direction: str, reason: str, when: datetime, st: Settings) -> str:
